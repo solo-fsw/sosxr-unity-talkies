@@ -2,12 +2,11 @@ using System.Collections;
 using UnityEngine;
 
 
-
 namespace SOSXR.Talkies
 {
     /// <summary>
     ///     Drives a GPIO pin HIGH for a short configurable duration, then LOW — a single pulse.
-    ///     Requires a <see cref="PinController"/> on the same GameObject.
+    ///     Requires a <see cref="PinController" /> on the same GameObject.
     ///     If a pulse is already in progress when <c>ToggleOnOff</c> is called again, the
     ///     running coroutine is cancelled and the pin is driven LOW.
     /// </summary>
@@ -21,12 +20,36 @@ namespace SOSXR.Talkies
         private Coroutine _toggleCoroutine;
 
 
+        /// <summary><c>true</c> while a pulse is running.</summary>
+        public bool IsPulsing => _toggleCoroutine != null;
+
+
+        private PinController Controller
+        {
+            get
+            {
+                if (_controller == null)
+                {
+                    _controller = GetComponent<PinController>();
+                }
+
+                return _controller;
+            }
+        }
+
+
         private void OnValidate()
         {
             if (_controller == null)
             {
                 _controller = GetComponent<PinController>();
             }
+        }
+
+
+        private void Awake()
+        {
+            _ = Controller;
         }
 
 
@@ -41,7 +64,7 @@ namespace SOSXR.Talkies
             {
                 StopCoroutine(_toggleCoroutine);
 
-                _controller.SetPin(m_pin, false);
+                Controller.SetPin(m_pin, false);
 
                 Debug.LogWarning("We already had a toogler running. Will turn that toggler off, but not continue from here. Toggle again to resume functionality.");
 
@@ -58,14 +81,16 @@ namespace SOSXR.Talkies
         {
             if (!Application.isPlaying)
             {
+                _toggleCoroutine = null;
+
                 yield break;
             }
 
-            _controller.SetPin(m_pin, true);
+            Controller.SetPin(m_pin, true);
 
             yield return new WaitForSeconds(m_toggleTime);
 
-            _controller.SetPin(m_pin, false);
+            Controller.SetPin(m_pin, false);
 
             _toggleCoroutine = null;
         }
@@ -73,9 +98,13 @@ namespace SOSXR.Talkies
 
         private void OnDisable()
         {
-            _controller.SetPin(m_pin, false);
-
             StopAllCoroutines();
+            _toggleCoroutine = null;
+
+            if (Controller != null && Controller.IsConnected)
+            {
+                Controller.SetPin(m_pin, false);
+            }
         }
     }
 }

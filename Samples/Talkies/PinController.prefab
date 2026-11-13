@@ -65,7 +65,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: SOSXR.Talkies::SOSXR.Talkies.PinController
   m_defaultPin: 16
-  m_debugToggleLED: 1
+  m_debugToggleLED: 0
   m_debugToggleRange: {x: 0.1, y: 0.5}
 --- !u!114 &983288119421743408
 MonoBehaviour:

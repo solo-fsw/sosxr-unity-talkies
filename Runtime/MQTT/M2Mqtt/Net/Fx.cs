@@ -30,7 +30,8 @@ namespace uPLibrary.Networking.M2Mqtt
     {
         public static void StartThread(ThreadStart threadStart)
         {
-            new Thread(threadStart).Start();
+            // SOSXR: background threads, so a lingering connection cannot keep the process (or Play mode) alive
+            new Thread(threadStart) { IsBackground = true }.Start();
         }
 
 

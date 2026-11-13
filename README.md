@@ -23,6 +23,8 @@ A Unity package for communicating with external devices. Talkies covers two comm
   - [Publish](#publish)
   - [Unsubscribe](#unsubscribe)
   - [Connection events](#connection-events)
+- [Inspector attributes](#inspector-attributes)
+- [Tests](#tests)
 - [Inline Documentation](#inline-documentation)
 - [Contributing](#contributing)
 - [License](#license)
@@ -36,8 +38,11 @@ A Unity package for communicating with external devices. Talkies covers two comm
 
 ## Dependencies
 
-- [EnhancedLogger](https://github.com/solo-fsw/sosxr-unity-enhancedlogger)
-- [Sea Shark](https://github.com/solo-fsw/sosxr-unity-seashark)
+- `com.unity.ugui` 2.0.0
+
+Optional, for Android serial only: add `usb-serial-for-android` to your Android Gradle build. It is not shipped with this package. `AndroidSerialConnector` works with versions 2.x and 3.x.
+
+Only a macOS arm64 `SerialPlugin.bundle` ships. No Windows DLL ships. To use desktop serial on Windows, build one from `Non-Unity/SerialPlugin_Windows.cpp`.
 
 ### MQTT
 
@@ -53,7 +58,7 @@ Two connector implementations are provided, both implementing `ISerialConnect`:
 
 | Component | Target platform | Native layer |
 |---|---|---|
-| `DesktopSerialConnector` | macOS / Windows | `SerialPlugin` native DLL |
+| `DesktopSerialConnector` | macOS / Windows | `SerialPlugin` native plugin (see [Dependencies](#dependencies)) |
 | `AndroidSerialConnector` | Android | Java bridge (`com.sosxr.serial.SerialBridge`) |
 
 Add **one** of these MonoBehaviours to a GameObject alongside the other serial components.
@@ -124,18 +129,22 @@ Add `SafetyPin` to the same GameObject as `PinController`. It listens for `OnPin
 
 ### ByteSize — raw byte protocol
 
-`ByteSize` is a lower-level serial component for devices that expect single- or double-byte ASCII-encoded commands (e.g. an Arduino Leonardo with a custom firmware). It uses the same `SerialPlugin` DLL as `DesktopSerialConnector`.
+`ByteSize` is a lower-level serial component for devices that expect single- or double-byte ASCII-encoded commands (e.g. an Arduino Leonardo with a custom firmware). It sends and reads through an `ISerialConnect` connector on the same GameObject (`Connector` property). It does not call the native plugin directly, so it works with the desktop and Android connectors.
 
 ```csharp
-byteSize.SendCommand('p');            // single byte
-byteSize.SendCommand('p', 's');       // position + speed
-byteSize.SendCommand("ps");           // equivalent two-char string form
-byteSize.Unlock();                    // sends 'u'
-byteSize.Stop();                      // sends 's'
-byteSize.Info();                      // sends 'i'
-byteSize.Version();                   // sends 'v'
-byteSize.ReadBuffer();                // read one byte and log it
+bool sent = byteSize.SendCommand((byte)'p');             // single byte, false when not sent
+byteSize.SendCommand((byte)'p', (byte)'s');              // position + speed
+byteSize.SendCommand("ps");                              // equivalent two-char string form
+byteSize.Unlock();                                       // sends 'u'
+byteSize.Stop();                                         // sends 's'
+byteSize.Info();                                         // sends 'i'
+byteSize.Version();                                      // sends 'v'
+byteSize.ReadBuffer();                                   // reads one byte into LastReceivedByte
+
+if (byteSize.TryReadByte(out byte value)) { /* use value */ }
 ```
+
+`SendCommand(byte)` and `SendCommand(byte, byte)` return `bool`. `TryReadByte` does not block. It returns `false` when nothing is available.
 
 The `ASCIITable` utility class handles char ↔ byte conversions, throwing `ArgumentOutOfRangeException` for non-ASCII input.
 
@@ -168,6 +177,8 @@ Topic filters follow standard MQTT wildcard rules:
 
 Subscriptions made before the broker connects are queued and flushed automatically on connection.
 
+Subscriptions survive disconnects, reconnects, focus loss (for example the Quest system menu) and `OnDestroy`. After a reconnect, every registered topic is subscribed again.
+
 ### Publish
 
 ```csharp
@@ -188,6 +199,14 @@ MQTTClient.Unsubscribe(OnMessage, topic: "myapp/sensor");
 
 When the last callback for a topic is removed, the broker subscription is cancelled too.
 
+To drop all subscriptions at once:
+
+```csharp
+MQTTClient.ClearSubscriptions();
+```
+
+Disconnects, reconnects and focus loss do not remove subscriptions.
+
 ### Connection events
 
 ```csharp
@@ -196,6 +215,40 @@ MQTTClient.OnDisconnected += () => Debug.Log("MQTT disconnected");
 ```
 
 Both events are invoked on the main thread.
+
+---
+
+## Inspector attributes
+
+The package's attributes have Inspector drawers in the `SOSXR.Talkies.Editor` assembly.
+
+| Attribute | Applies to | Effect |
+|---|---|---|
+| `[Button]` | methods | Shows a button. Parameters of type int, float, double, long, byte, bool, string or enum get input fields. Runs on all selected objects, with Undo. |
+| `[ShowIf(nameof(field))]` | fields | Hides the field while the condition is false. |
+| `[EnableIf(nameof(field))]` | fields | Greys out the field while the condition is false. A bool condition gets a checkbox in front of the field. |
+| `[DisableEditing]` | fields | Shows the field read-only. |
+| `[Suffix("ms")]` | fields | Draws a unit label after the field. |
+
+Conditions may be bool, object reference, enum, int or string fields.
+
+Components from this package (`PinController`, `PinTimer`, `PinTimerWithEvents`, the serial connectors, `ByteSize` and `MQTTTester`) already show their buttons. For your own component, derive from `TalkiesButtonEditor` in an Editor script. The script's assembly must reference `SOSXR.Talkies.Editor`.
+
+```csharp
+using SOSXR.Talkies.Editor;
+using UnityEditor;
+
+[CustomEditor(typeof(MyComponent))]
+public class MyComponentEditor : TalkiesButtonEditor { }
+```
+
+---
+
+## Tests
+
+- EditMode tests live in `Tests/Editor/` (assembly `SOSXR.Talkies.Tests`).
+- Run them from `Window > General > Test Runner`, EditMode tab.
+- There are no PlayMode tests. Network and native serial paths need hardware or a broker.
 
 ---
 

@@ -28,8 +28,8 @@ namespace MQTTUnity
         }
 
 
-        [Button]
         /// <summary>Publishes the configured debug payload to the debug topic via <see cref="MQTTClient"/>.</summary>
+        [Button]
         public void PublishDebug()
         {
             MQTTClient.Publish(m_debugTopic, m_debugPayload);

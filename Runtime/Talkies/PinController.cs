@@ -1,9 +1,9 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using System.Text;
 using UnityEngine;
+using Object = UnityEngine.Object;
 using Random = UnityEngine.Random;
 
 
@@ -12,64 +12,105 @@ namespace SOSXR.Talkies
     /// <summary>
     ///     Controls GPIO pins on a Raspberry Pi Pico (or compatible device) connected via serial.
     ///     Communicates using a simple CSV command protocol: <c>SET,&lt;pin&gt;,&lt;0|1&gt;</c> and
-    ///     <c>GET,&lt;pin&gt;</c>. Responses are parsed and surfaced via <see cref="OnPinSetEvent"/>
-    ///     and <see cref="OnPinGetEvent"/>.
+    ///     <c>GET,&lt;pin&gt;</c> (see <see cref="PinProtocol" />). Responses are parsed and surfaced via
+    ///     <see cref="OnPinSetEvent" /> and <see cref="OnPinGetEvent" />.
     ///     <para>
-    ///         Requires an <see cref="ISerialConnect"/> component on the same GameObject.
-    ///         Consider also adding <see cref="SafetyPin"/> to automatically drive pins LOW
+    ///         Needs an <see cref="ISerialConnect" /> component (such as <see cref="DesktopSerialConnector" /> or
+    ///         <see cref="AndroidSerialConnector" />) on the same GameObject. All reads and writes go through that
+    ///         connector. Consider also adding <see cref="SafetyPin" /> to automatically drive pins LOW
     ///         after a configurable timeout.
     ///     </para>
     /// </summary>
-    [RequireComponent(typeof(ISerialConnect))]
     public class PinController : MonoBehaviour
     {
+        /// <summary>The onboard LED pin of a Raspberry Pi Pico.</summary>
+        public const int LedPin = 25;
+
+        private const int ReadChunkSize = 1024;
+        private const int MaxReadChunksPerFrame = 16;
+
         [Header("Pin Control")]
         [SerializeField] [Range(0, 29)] private int m_defaultPin = 16;
 
         [Header("Debug")]
-        [SerializeField] private bool m_debugToggleLED = true;
+        [Tooltip("Randomly toggles the onboard LED (pin 25) while enabled. For testing the connection only.")]
+        [SerializeField] private bool m_debugToggleLED;
         [SerializeField] [ShowIf(nameof(m_debugToggleLED))] private Vector2 m_debugToggleRange = new(0.1f, 0.5f);
-        [SerializeField] private int m_desiredBaud;
-        [SerializeField] [DisableEditing] private int _currentBaud;
 
-        private readonly StringBuilder receiveBuffer = new();
-        private readonly byte[] readBuffer = new byte[1024];
-
-        private readonly int _ledPin = 25;
-
+        private readonly byte[] _readBuffer = new byte[ReadChunkSize];
+        private readonly SerialLineBuffer _lineBuffer = new();
         private readonly List<int> _pinList = new();
+        private readonly Dictionary<int, Action<int, bool>> _pendingToggles = new();
 
         private ISerialConnect _connector;
+        private bool _warnedNoConnector;
+
+        /// <summary>Fired when a GET response is received, reporting the pin number and its current value.</summary>
+        public event Action<int, bool> OnPinGetEvent;
 
         /// <summary>Fired after a SET command confirmation is received, with the pin number and the new value.</summary>
-        public event Action<int, bool> OnPinGetEvent;
-        /// <summary>Fired when a GET response is received, reporting the pin number and its current value.</summary>
         public event Action<int, bool> OnPinSetEvent;
 
 
-        [DllImport("SerialPlugin")]
-        private static extern int SerialSetBaud(int baud);
-
-
-        [DllImport("SerialPlugin")]
-        private static extern int SerialWrite(byte[] data, int length);
-
-
-        [DllImport("SerialPlugin")]
-        private static extern int SerialRead(byte[] buffer, int bufferSize);
-
-
-        [DllImport("SerialPlugin")]
-        private static extern int SerialWrite2(byte pos, byte speed);
-
-
-        [DllImport("SerialPlugin")]
-        private static extern int SerialRead2(out byte pos, out byte speed);
-
-
-        private void OnValidate()
+        /// <summary>
+        ///     The serial connector used for all reads and writes. Resolved lazily from this GameObject,
+        ///     so it also works in builds and after <c>AddComponent</c> at runtime. Can be set explicitly.
+        /// </summary>
+        public ISerialConnect Connector
         {
-            _connector ??= GetComponent<ISerialConnect>();
+            get
+            {
+                if (IsMissing(_connector))
+                {
+                    _connector = GetComponent<ISerialConnect>();
+                }
+
+                if (IsMissing(_connector) && !_warnedNoConnector)
+                {
+                    _warnedNoConnector = true;
+                    Debug.LogWarning($"{nameof(PinController)} on {name} has no {nameof(ISerialConnect)} component. Add a {nameof(DesktopSerialConnector)} or {nameof(AndroidSerialConnector)}.");
+                }
+
+                return IsMissing(_connector) ? null : _connector;
+            }
+            set
+            {
+                _connector = value;
+                _warnedNoConnector = false;
+            }
+        }
+
+        /// <summary><c>true</c> when a connector exists and reports that it is connected.</summary>
+        public bool IsConnected => Connector is { IsConnected: true };
+
+        /// <summary>Pins that have been set through this controller. They are driven LOW on disable.</summary>
+        public IReadOnlyList<int> UsedPins => _pinList;
+
+
+        private static bool IsMissing(ISerialConnect connector)
+        {
+            if (connector == null)
+            {
+                return true;
+            }
+
+            // A destroyed Unity component compares equal to null only through UnityEngine.Object's operator.
+            return connector is Object unityObject && unityObject == null;
+        }
+
+
+        private void Awake()
+        {
+            _ = Connector;
+        }
+
+
+        private void OnEnable()
+        {
+            if (m_debugToggleLED && m_debugToggleRange != Vector2.zero)
+            {
+                StartCoroutine(DebugToggleCR());
+            }
         }
 
 
@@ -78,11 +119,6 @@ namespace SOSXR.Talkies
             if (GetComponent<SafetyPin>() == null)
             {
                 Debug.LogWarning($"You're running this without {nameof(SafetyPin)}. Is that wise?");
-            }
-
-            if (m_debugToggleLED && m_debugToggleRange != Vector2.zero)
-            {
-                StartCoroutine(DebugToggleCR());
             }
         }
 
@@ -95,142 +131,138 @@ namespace SOSXR.Talkies
 
                 yield return new WaitForSeconds(duration);
 
-                ToggleLED();
+                if (IsConnected)
+                {
+                    ToggleLED();
+                }
             }
         }
 
 
         private void Update()
         {
-            // SetBaud(m_desiredBaud);
-
-            ReadBuffer();
+            PollSerial();
         }
 
 
-        [Button(space: 10, horizontalLine: true)]
-        private void SetBaud(int baud)
+        /// <summary>
+        ///     Reads all bytes the connector has available and processes every complete response line.
+        ///     Called every frame from <c>Update</c>. Does nothing while not connected.
+        /// </summary>
+        public void PollSerial()
         {
-            if (!_connector.IsConnected)
-            {
-                Debug.LogWarning("We're not connected! Cannot continue");
+            var connector = Connector;
 
-                return;
-            }
-
-            var ok = SerialSetBaud(baud);
-
-            if (ok == 1)
-            {
-                // Debug.Log("Baud successfully updated to " + baud);
-            }
-            else
-            {
-                Debug.LogError($"Failed to set baud to {baud}");
-            }
-        }
-
-
-        private void ReadBuffer()
-        {
-            if (!_connector.IsConnected)
-            {
-                Debug.LogWarning("We're not connected! Cannot continue");
-
-                return;
-            }
-
-            var bytesRead = SerialRead(readBuffer, readBuffer.Length);
-
-            if (bytesRead <= 0)
+            if (connector is not { IsConnected: true })
             {
                 return;
             }
 
-            var chunk = Encoding.ASCII.GetString(readBuffer, 0, bytesRead);
-            receiveBuffer.Append(chunk);
-
-            var bufferStr = receiveBuffer.ToString();
-            int newlineIndex;
-
-            while ((newlineIndex = bufferStr.IndexOf('\n')) >= 0)
+            for (var i = 0; i < MaxReadChunksPerFrame; i++)
             {
-                var line = bufferStr.Substring(0, newlineIndex).Trim();
+                int bytesRead;
 
-                if (line.Length > 0)
+                try
                 {
-                    ProcessResponse(line);
+                    bytesRead = connector.Read(_readBuffer, 0, _readBuffer.Length);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"Serial read failed: {e.Message}");
+
+                    break;
                 }
 
-                bufferStr = bufferStr.Substring(newlineIndex + 1);
+                if (bytesRead <= 0)
+                {
+                    break;
+                }
+
+                _lineBuffer.Append(_readBuffer, 0, bytesRead);
+
+                if (bytesRead < _readBuffer.Length)
+                {
+                    break;
+                }
             }
 
-            receiveBuffer.Clear();
-            receiveBuffer.Append(bufferStr);
-        }
-
-
-        private void ProcessResponse(string response)
-        {
-            var parts = response.Split(',');
-
-            if (parts.Length < 2)
+            while (_lineBuffer.TryReadLine(out var line))
             {
-                return;
-            }
-
-            var status = parts[0];
-            var command = parts[1];
-
-            if (status == "ERR")
-            {
-                Debug.LogError($"Pico Error: {response}");
-
-                return;
-            }
-
-            if (command == "SET" && parts.Length >= 4)
-            {
-                var pin = int.Parse(parts[2]);
-                var value = int.Parse(parts[3]);
-                var boolValue = value == 1;
-                OnPinSet(pin, boolValue);
-            }
-            else if (command == "GET" && parts.Length >= 4)
-            {
-                var pin = int.Parse(parts[2]);
-                var value = int.Parse(parts[3]);
-                var boolValue = value == 1;
-                OnPinGet(pin, boolValue);
-            }
-            else // This should include the PING/PONG debug response
-            {
-                Debug.Log($"Pico: {response}");
+                ProcessResponse(line);
             }
         }
 
 
-        private void SendCommand(string command)
+        /// <summary>Handles one response line from the device. Public so it can be fed from other sources and tested.</summary>
+        public void ProcessResponse(string line)
         {
-            if (!_connector.IsConnected)
+            var response = PinProtocol.Parse(line);
+
+            switch (response.Kind)
+            {
+                case PinResponseKind.PinSet:
+                    OnPinSetEvent?.Invoke(response.Pin, response.Value);
+
+                    break;
+                case PinResponseKind.PinGet:
+                    if (_pendingToggles.TryGetValue(response.Pin, out var toggle))
+                    {
+                        _pendingToggles.Remove(response.Pin);
+                        toggle?.Invoke(response.Pin, response.Value);
+                    }
+
+                    OnPinGetEvent?.Invoke(response.Pin, response.Value);
+
+                    break;
+                case PinResponseKind.Error:
+                    Debug.LogError($"Pico Error: {response.Raw}");
+
+                    break;
+                case PinResponseKind.Malformed:
+                    Debug.LogWarning($"Pico sent a malformed response, ignored: {response.Raw}");
+
+                    break;
+                default: // This includes the PING/PONG debug response
+                    Debug.Log($"Pico: {response.Raw}");
+
+                    break;
+            }
+        }
+
+
+        private bool SendCommand(string command)
+        {
+            var connector = Connector;
+
+            if (connector is not { IsConnected: true })
             {
                 Debug.LogWarning($"Not connected. Cannot send: {command}");
 
-                return;
+                return false;
             }
 
-            var fullCommand = command + "\n";
-            var data = Encoding.ASCII.GetBytes(fullCommand);
-            var written = SerialWrite(data, data.Length);
+            var data = Encoding.ASCII.GetBytes(command + "\n");
+            int written;
+
+            try
+            {
+                written = connector.Write(data, 0, data.Length);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"Write failed for command {command}: {e.Message}");
+
+                return false;
+            }
 
             if (written != data.Length)
             {
                 Debug.LogError($"Write failed. Sent {written}/{data.Length} bytes for command: {command}");
+
+                return false;
             }
-            else
-            {
-                // Debug.Log($"Sent: {command}");
-            }
+
+            return true;
         }
 
 
@@ -250,12 +282,7 @@ namespace SOSXR.Talkies
         [Button]
         public void ToggleLED()
         {
-            TogglePin(_ledPin, (pin, currentValue) =>
-            {
-                var newValue = !currentValue;
-                SetPin(pin, newValue);
-                Debug.Log($"LED toggled from {HighLow(currentValue)} to {HighLow(newValue)}");
-            });
+            TogglePin(LedPin);
         }
 
 
@@ -266,15 +293,15 @@ namespace SOSXR.Talkies
         [Button(space: 10, horizontalLine: true)]
         public void SetDefaultPin(bool value)
         {
-            SendCommand($"SET,{m_defaultPin},{(value ? 1 : 0)}");
+            SetPin(m_defaultPin, value);
         }
 
 
-        /// <summary>Sends a GET command for the default pin, which triggers <see cref="OnPinGetEvent"/> when the response arrives.</summary>
+        /// <summary>Sends a GET command for the default pin, which triggers <see cref="OnPinGetEvent" /> when the response arrives.</summary>
         [Button]
         public void GetDefaultPin()
         {
-            SendCommand($"GET,{m_defaultPin}");
+            GetPin(m_defaultPin);
         }
 
 
@@ -282,12 +309,7 @@ namespace SOSXR.Talkies
         [Button]
         public void ToggleDefaultPin()
         {
-            TogglePin(m_defaultPin, (pin, currentValue) =>
-            {
-                var newValue = !currentValue;
-                SetPin(pin, newValue);
-                Debug.Log($"Toggled pin {pin} from {HighLow(currentValue)} to {HighLow(newValue)}");
-            });
+            TogglePin(m_defaultPin);
         }
 
 
@@ -305,98 +327,69 @@ namespace SOSXR.Talkies
                 _pinList.Add(pin);
             }
 
-            SendCommand($"SET,{pin},{(value ? 1 : 0)}");
+            SendCommand(PinProtocol.FormatSet(pin, value));
         }
 
 
         /// <summary>
-        ///     Sends a GET command for the given pin. The response arrives asynchronously via <see cref="OnPinGetEvent"/>.
+        ///     Sends a GET command for the given pin. The response arrives asynchronously via <see cref="OnPinGetEvent" />.
         /// </summary>
         /// <param name="pin">GPIO pin number to query.</param>
         [Button]
         public void GetPin(int pin)
         {
-            SendCommand($"GET,{pin}");
+            SendCommand(PinProtocol.FormatGet(pin));
         }
 
 
         /// <summary>
         ///     Reads the current value of the specified pin, then sets it to the opposite state.
+        ///     Only one toggle per pin can be pending; a second call before the device answers replaces the first.
+        ///     Does nothing while not connected.
         /// </summary>
         /// <param name="pin">GPIO pin number to toggle.</param>
         [Button]
         public void TogglePin(int pin)
         {
-            TogglePin(pin, (p, currentValue) =>
+            if (!IsConnected)
+            {
+                Debug.LogWarning($"Not connected. Cannot toggle pin {pin}.");
+
+                return;
+            }
+
+            _pendingToggles[pin] = (p, currentValue) =>
             {
                 var newValue = !currentValue;
+                SetPin(p, newValue);
+                Debug.Log($"Toggled pin {p} from {PinProtocol.HighLow(currentValue)} to {PinProtocol.HighLow(newValue)}");
+            };
 
-
-                SetPin(pin, newValue);
-                Debug.Log($"Toggled pin {pin} from {HighLow(currentValue)} to {HighLow(newValue)}");
-            });
-        }
-
-
-        private void OnPinSet(int pin, bool value)
-        {
-            // Debug.Log($"We asked pin {pin} to be set to {HighLow(value)}.");
-            OnPinSetEvent?.Invoke(pin, value);
-        }
-
-
-        private void OnPinGet(int pin, bool value)
-        {
-            // Debug.Log($"Device states that pin {pin} is now {HighLow(value)}.");
-            OnPinGetEvent?.Invoke(pin, value);
-        }
-
-
-        /// <summary>
-        ///     This method gets the current pin value, and then creates a small handler which will get invoked when the OnPinGetEvent is invoked: thus when we know the current value.
-        ///     You can then set the value of the pin to the opposite that it was previously. Example:
-        ///     GetAndSetPin(_ledPin, (pin, currentValue) => { SetPin(pin, !currentValue); });
-        /// </summary>
-        /// <param name="pin"></param>
-        /// <param name="callback"></param>
-        private void TogglePin(int pin, Action<int, bool> callback)
-        {
-            OnPinGetEvent += handler;
-            GetPin(pin);
-
-            return;
-
-
-            void handler(int p, bool val)
+            if (!SendCommand(PinProtocol.FormatGet(pin)))
             {
-                if (p == pin)
-                {
-                    callback?.Invoke(p, val);
-                    OnPinGetEvent -= handler;
-                }
+                _pendingToggles.Remove(pin);
             }
         }
 
 
-        /// <summary>
-        ///     Small helper method that renames TRUE/FALSE to HIGH/LOW, which is more in line with GPIO-lingo.
-        /// </summary>
-        /// <param name="value"></param>
-        /// <returns></returns>
-        private string HighLow(bool value)
-        {
-            return value ? "HIGH" : "LOW";
-        }
+        /// <summary>Number of toggles waiting for a GET answer from the device.</summary>
+        public int PendingToggleCount => _pendingToggles.Count;
 
 
         private void OnDisable()
         {
-            foreach (var pin in _pinList)
+            StopAllCoroutines();
+            _pendingToggles.Clear();
+
+            if (!IsConnected)
+            {
+                return;
+            }
+
+            foreach (var pin in _pinList.ToArray())
             {
                 SetPin(pin, false);
             }
-
-            StopAllCoroutines();
         }
     }
 }

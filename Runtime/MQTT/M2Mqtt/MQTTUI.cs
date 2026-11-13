@@ -177,8 +177,8 @@ namespace MQTTUnity
 
             SetUIMessage();
 
-            MQTTClient.OnConnected += HandleConnectedUI;
-            MQTTClient.OnDisconnected += HandleDisconnectedUI;
+            MQTTClient.OnConnected -= HandleConnectedUI;
+            MQTTClient.OnDisconnected -= HandleDisconnectedUI;
         }
     }
 }

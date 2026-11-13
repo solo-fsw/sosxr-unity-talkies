@@ -5,6 +5,10 @@ using UnityEngine;
 using UnityEngine.Events;
 
 
+/// <summary>
+///     Invokes a UnityEvent when an MQTT message arrives, optionally only for one topic and/or one payload.
+///     An empty topic subscribes to all topics (<c>#</c>). Wildcards (<c>+</c>, <c>#</c>) are supported.
+/// </summary>
 public class MQTTFirstResponder : MonoBehaviour
 {
     [SerializeField] [HideInInspector] private bool m_toggleTopic;
@@ -19,6 +23,12 @@ public class MQTTFirstResponder : MonoBehaviour
     [SerializeField] private string m_onlyRespondToThisPayload;
 
     [SerializeField] private UnityEvent<string, string> m_onMessageReceived;
+
+    private string _subscribedTopic;
+
+
+    /// <summary>The topic filter actually used: <c>#</c> when the configured topic is empty.</summary>
+    public string EffectiveTopic => string.IsNullOrEmpty(m_onlyRespondToThisTopic) ? "#" : m_onlyRespondToThisTopic;
 
 
     private void OnValidate()
@@ -37,25 +47,22 @@ public class MQTTFirstResponder : MonoBehaviour
 
     private void OnEnable()
     {
-        MQTTClient.Subscribe(MessageReceived, m_onlyRespondToThisTopic);
+        _subscribedTopic = EffectiveTopic;
+        MQTTClient.Subscribe(MessageReceived, _subscribedTopic);
     }
 
 
     private void MessageReceived(string topic, byte[] payload)
     {
-        if (topic != m_onlyRespondToThisTopic && m_onlyRespondToThisTopic != "#" && !string.IsNullOrEmpty(m_onlyRespondToThisTopic))
+        if (!MQTTClient.TopicMatches(EffectiveTopic, topic))
         {
-            // Debug.Log($"We got something, but not the correct topic (incoming is {topic}).");
-
             return;
         }
 
-        var payloadString = Encoding.UTF8.GetString(payload);
+        var payloadString = payload == null ? string.Empty : Encoding.UTF8.GetString(payload);
 
         if (payloadString != m_onlyRespondToThisPayload && m_onlyRespondToThisPayload != "#" && !string.IsNullOrEmpty(m_onlyRespondToThisPayload))
         {
-            // Debug.Log($"We got something, but not the correct payload (Payload received is {payloadString}).");
-
             return;
         }
 
@@ -67,6 +74,7 @@ public class MQTTFirstResponder : MonoBehaviour
 
     private void OnDisable()
     {
-        MQTTClient.Unsubscribe(MessageReceived, m_onlyRespondToThisTopic);
+        // Use the topic we subscribed with, even if the Inspector value changed since.
+        MQTTClient.Unsubscribe(MessageReceived, _subscribedTopic);
     }
 }

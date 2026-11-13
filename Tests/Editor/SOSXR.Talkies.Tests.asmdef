@@ -1,0 +1,26 @@
+{
+  "name": "SOSXR.Talkies.Tests",
+  "rootNamespace": "SOSXR.Talkies.Tests",
+  "references": [
+    "UnityEngine.TestRunner",
+    "UnityEditor.TestRunner",
+    "SOSXR.Talkies",
+    "SOSXR.Talkies.MQTT",
+    "SOSXR.Talkies.Editor"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": true,
+  "precompiledReferences": [
+    "nunit.framework.dll"
+  ],
+  "autoReferenced": false,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

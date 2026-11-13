@@ -1,28 +1,28 @@
 {
   "name": "com.sosxr.talkies",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "displayName": "Talkies",
   "description": "A Unity package for communication with other devices",
   "documentationUrl": "https://github.com/solo-fsw/sosxr-unity-talkies",
   "unity": "6000.0",
   "dependencies": {
-    "com.unity.textmeshpro": "3.0.6"
+    "com.unity.ugui": "2.0.0"
   },
   "samples": [
     {
       "displayName": "MQTT",
       "description": "Contains MQTT samples",
-      "path": "Samples~/MQTT"
+      "path": "Samples/MQTT"
     },
     {
       "displayName": "MQTT raspmarker",
       "description": "Contains raspmarker samples",
-      "path": "Samples~/MQTT_raspmarker"
+      "path": "Samples/MQTT_raspmarker"
     },
     {
       "displayName": "Talkies",
       "description": "Contains talkies samples",
-      "path": "Samples~/Talkies"
+      "path": "Samples/Talkies"
     }
   ],
   "author": {
