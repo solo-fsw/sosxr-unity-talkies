@@ -177,6 +177,97 @@ namespace SOSXR.Talkies.Tests
 
 
         [Test]
+        public void TogglePin_AnswerAfterTimeout_DoesNotSetPin()
+        {
+            var now = 10f;
+            _controller.Clock = () => now;
+            _controller.PendingToggleTimeout = 2f;
+
+            _controller.TogglePin(5);
+            _connector.ClearWritten();
+
+            now = 13f;
+            LogAssert.Expect(LogType.Warning, new Regex("dropped"));
+            _connector.Receive("OK,GET,5,0\n");
+            _controller.PollSerial();
+
+            Assert.That(_connector.WrittenText, Is.Empty, "A stale toggle must not actuate the pin.");
+            Assert.That(_controller.PendingToggleCount, Is.Zero);
+        }
+
+
+        [Test]
+        public void TogglePin_AnswerWithinTimeout_SetsPin()
+        {
+            var now = 10f;
+            _controller.Clock = () => now;
+            _controller.PendingToggleTimeout = 2f;
+
+            _controller.TogglePin(5);
+            _connector.ClearWritten();
+
+            now = 11.5f;
+            _connector.Receive("OK,GET,5,0\n");
+            _controller.PollSerial();
+
+            Assert.That(_connector.WrittenText, Is.EqualTo("SET,5,1\n"));
+        }
+
+
+        [Test]
+        public void PollSerial_ExpiresPendingToggleWithoutAnswer()
+        {
+            var now = 10f;
+            _controller.Clock = () => now;
+            _controller.PendingToggleTimeout = 2f;
+
+            _controller.TogglePin(5);
+            now = 12.5f;
+
+            LogAssert.Expect(LogType.Warning, new Regex("dropped"));
+            _controller.PollSerial();
+
+            Assert.That(_controller.PendingToggleCount, Is.Zero);
+        }
+
+
+        [Test]
+        public void Disconnect_ClearsPendingTogglesAndPartialLine()
+        {
+            var gets = 0;
+            _controller.OnPinGetEvent += (_, _) => gets++;
+
+            _controller.TogglePin(5);
+            _connector.Receive("OK,GET,5,");
+            _controller.PollSerial(); // half a line buffered
+
+            _connector.Connected = false;
+            _controller.PollSerial();
+
+            Assert.That(_controller.PendingToggleCount, Is.Zero);
+
+            _connector.Connected = true;
+            _connector.ClearWritten();
+            _connector.Receive("1\n");
+            _controller.PollSerial();
+
+            Assert.That(gets, Is.Zero, "The old half line must not be glued to new data.");
+            Assert.That(_connector.WrittenText, Is.Empty);
+        }
+
+
+        [Test]
+        public void ChangingConnector_ClearsPendingToggles()
+        {
+            _controller.TogglePin(5);
+
+            _controller.Connector = new FakeSerialConnector();
+
+            Assert.That(_controller.PendingToggleCount, Is.Zero);
+        }
+
+
+        [Test]
         public void ExplicitConnector_IsUsed()
         {
             var other = new FakeSerialConnector();

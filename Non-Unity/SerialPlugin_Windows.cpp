@@ -170,6 +170,7 @@ EXPORT int SerialWriteTwo(unsigned char position, unsigned char speed) {
 
 // --------------------
 // SerialRead - Read one byte
+// Returns 0-255 for a byte, -1 when no data is available, -2 when the device is gone (unplugged / I/O error).
 // --------------------
 EXPORT int SerialRead() {
     if (hSerial == INVALID_HANDLE_VALUE) {
@@ -180,7 +181,9 @@ EXPORT int SerialRead() {
     DWORD bytesRead;
 
     if (!ReadFile(hSerial, &byte, 1, &bytesRead, NULL)) {
-        return -1;  // Read error
+        // With the read timeouts set in SerialOpen, "no data" succeeds with 0 bytes; a failure means the device is gone.
+        if (debugSerial) std::cerr << "Serial read error: " << GetLastError() << std::endl;
+        return -2;
     }
 
     if (bytesRead == 1) {

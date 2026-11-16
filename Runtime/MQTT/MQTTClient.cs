@@ -75,17 +75,41 @@ namespace MQTTUnity
         [Tooltip("Keep this client (and its connection) alive when a new scene loads")]
         [SerializeField] private bool m_persistAcrossScenes;
 
+        [Tooltip("Reconnect automatically after the connection is lost or a connection attempt fails. Waits 1, 2, 4, ... seconds between attempts, up to the maximum below. Stops on Disconnect.")]
+        [SerializeField] private bool m_autoReconnect;
+
+        [Tooltip("Longest wait between two reconnect attempts")]
+        [SerializeField] [Suffix("s")] private float m_maxReconnectDelay = 30f;
+
+        [Tooltip("Most publications kept while not connected. When full, the oldest is dropped. 0 or less: no limit.")]
+        [SerializeField] private int m_maxPendingPublications = DefaultMaxPendingPublications;
+
+        [Tooltip("Publications older than this are dropped instead of sent when the connection is made, e.g. for time-critical markers. 0 or less: no age limit.")]
+        [SerializeField] [Suffix("s")] private float m_maxPendingPublicationAge;
+
         [Tooltip("UserName for the MQTT broker. Keep blank if no user name is required.")]
         [SerializeField] private string m_MQTTUserName = string.Empty;
 
         [Tooltip("Password for the MQTT broker. Keep blank if no password is required.")]
         [SerializeField] private string m_MQTTPassword = string.Empty;
 
+        /// <summary>Default for the maximum number of publications queued while not connected.</summary>
+        public const int DefaultMaxPendingPublications = 100;
+
         private static MQTTBackend _MQTTBackend;
+
+        /// <summary>
+        ///     Backend of a finished connect attempt that the connect coroutine has not picked up yet. Guarded by
+        ///     <see cref="_connectLock" />, together with <see cref="_connectionGeneration" /> changes, so a
+        ///     disconnect either sees it here and shuts it down, or the connect thread sees the new generation.
+        /// </summary>
+        private static MQTTBackend _connectingBackend;
+        private static readonly object _connectLock = new();
 
         private static readonly ConcurrentQueue<MqttMsgPublishEventArgs> _incomingMessages = new();
         private static readonly Dictionary<string, Subscription> _topicCallbacks = new();
-        private static readonly List<(string topic, byte[] message, byte qosLevel, bool retain)> _pendingPublications = new(); // For anyone publishing before we're connected
+        private static readonly List<(string topic, byte[] message, byte qosLevel, bool retain, long queuedAt)> _pendingPublications = new(); // For anyone publishing before we're connected
+        private static bool _warnedPendingOverflow;
 
         private static int _connectionGeneration;
         private static volatile bool _connectionClosed;
@@ -93,6 +117,10 @@ namespace MQTTUnity
 
         private Coroutine _connect;
         private Coroutine _disconnect;
+        private Coroutine _reconnect;
+        private int _reconnectAttempts;
+        private bool _wantConnected; // Connect() was called and Disconnect() was not: auto-reconnect and re-enable may connect again
+        private bool _resumeOnEnable;
 
         /// <summary>Gets or sets the broker hostname or IP address.</summary>
         public string BrokerAddress
@@ -158,7 +186,7 @@ namespace MQTTUnity
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         internal static void ResetStaticState()
         {
-            Interlocked.Increment(ref _connectionGeneration);
+            ShutDownBackend(InvalidateConnectAttempts());
 
             var backend = _MQTTBackend;
             _MQTTBackend = null;
@@ -170,12 +198,57 @@ namespace MQTTUnity
 
             _topicCallbacks.Clear();
             _pendingPublications.Clear();
+            _warnedPendingOverflow = false;
             _connectionClosed = false;
             _connected = false;
             OnConnected = null;
             OnDisconnected = null;
             Instance = null;
+
+#if UNITY_EDITOR
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            UnityEditor.AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+#endif
         }
+
+
+        /// <summary>
+        ///     Makes every connect attempt in progress stale, and takes the backend of an attempt that finished
+        ///     but was not picked up yet. The caller must shut that backend down.
+        /// </summary>
+        private static MQTTBackend InvalidateConnectAttempts()
+        {
+            lock (_connectLock)
+            {
+                Interlocked.Increment(ref _connectionGeneration);
+                var connecting = _connectingBackend;
+                _connectingBackend = null;
+
+                return connecting;
+            }
+        }
+
+
+#if UNITY_EDITOR
+        /// <summary>
+        ///     A script recompile in Play mode reloads the domain without OnDestroy / OnApplicationQuit.
+        ///     Close the socket and its threads first, so they do not outlive the old domain as zombies.
+        /// </summary>
+        private static void OnBeforeAssemblyReload()
+        {
+            if (Instance != null)
+            {
+                Instance.StopAllCoroutines();
+            }
+
+            ShutDownBackend(InvalidateConnectAttempts());
+
+            _connected = false;
+            var backend = _MQTTBackend;
+            _MQTTBackend = null;
+            ShutDownBackend(backend);
+        }
+#endif
 
 
         /// <summary>
@@ -214,6 +287,8 @@ namespace MQTTUnity
         [ContextMenu(nameof(Connect))]
         public void Connect()
         {
+            _wantConnected = true;
+
             if (IsConnected || _connect != null)
             {
                 return;
@@ -238,38 +313,41 @@ namespace MQTTUnity
                 ShutDownBackend(stale);
             }
 
-            MQTTBackend backend;
-
-            try
-            {
-                backend = new MQTTBackend(m_brokerAddress, m_brokerPort, m_isEncrypted, null, null,
-                    m_isEncrypted ? MqttSslProtocols.TLSv1_2 : MqttSslProtocols.None);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"Initialization failed: {e.Message}");
-                _connect = null;
-                OnDisconnected?.Invoke();
-
-                yield break;
-            }
-
+            var brokerAddress = m_brokerAddress;
+            var brokerPort = m_brokerPort;
+            var isEncrypted = m_isEncrypted;
             var clientId = Guid.NewGuid().ToString();
             var userName = m_MQTTUserName;
             var password = m_MQTTPassword;
             var timeout = m_timeoutOnConnection;
             var connectResult = false;
-            var aborted = false;
+            var initFailed = false;
             string errorMsg = null;
 
             // Run connect in a background thread, so a slow broker does not freeze the main thread.
             var connectThread = new Thread(() =>
             {
+                MQTTBackend created;
+
                 try
                 {
-                    backend.Settings.TimeoutOnConnection = timeout;
-                    backend.Connect(clientId, userName, password);
-                    connectResult = backend.IsConnected;
+                    // The constructor resolves the host name (blocking DNS), so it runs here and not on the main thread.
+                    created = new MQTTBackend(brokerAddress, brokerPort, isEncrypted, null, null,
+                        isEncrypted ? MqttSslProtocols.TLSv1_2 : MqttSslProtocols.None);
+                }
+                catch (Exception e)
+                {
+                    initFailed = true;
+                    errorMsg = e.Message;
+
+                    return;
+                }
+
+                try
+                {
+                    created.Settings.TimeoutOnConnection = timeout;
+                    created.Connect(clientId, userName, password);
+                    connectResult = created.IsConnected;
                 }
                 catch (Exception e)
                 {
@@ -277,11 +355,23 @@ namespace MQTTUnity
                     errorMsg = e.Message;
                 }
 
-                // Disconnect() or OnDestroy() ran while we were connecting: do not leak a live connection.
-                if (generation != Volatile.Read(ref _connectionGeneration))
+                // Hand the backend to the coroutine, unless Disconnect() / OnDestroy() ran while we were connecting.
+                // The handover is under the lock, so a disconnect after this point finds it in _connectingBackend
+                // and shuts it down, even when the coroutine is stopped before it resumes.
+                var handedOver = false;
+
+                lock (_connectLock)
                 {
-                    aborted = true;
-                    ShutDownBackend(backend);
+                    if (generation == _connectionGeneration)
+                    {
+                        _connectingBackend = created;
+                        handedOver = true;
+                    }
+                }
+
+                if (!handedOver)
+                {
+                    ShutDownBackend(created);
                 }
             })
             {
@@ -299,10 +389,29 @@ namespace MQTTUnity
 
             _connect = null;
 
-            if (aborted || generation != Volatile.Read(ref _connectionGeneration))
+            if (initFailed)
             {
-                ShutDownBackend(backend);
+                Debug.LogError($"Initialization failed: {errorMsg}");
+                OnDisconnected?.Invoke();
+                ScheduleReconnect();
 
+                yield break;
+            }
+
+            MQTTBackend backend = null;
+
+            lock (_connectLock)
+            {
+                if (generation == _connectionGeneration)
+                {
+                    backend = _connectingBackend;
+                    _connectingBackend = null;
+                }
+            }
+
+            if (backend == null)
+            {
+                // Aborted: the connect thread or the disconnect already shut the backend down.
                 yield break;
             }
 
@@ -327,6 +436,51 @@ namespace MQTTUnity
             ShutDownBackend(backend);
             Debug.LogError($"Failed to connect to {m_brokerAddress}:{m_brokerPort}\n{errorMsg}");
             OnDisconnected?.Invoke();
+            ScheduleReconnect();
+        }
+
+
+        /// <summary>
+        ///     Starts the next reconnect attempt after an exponential backoff (1, 2, 4, ... seconds, capped at
+        ///     <c>m_maxReconnectDelay</c>). Only when auto-reconnect is on and nobody asked to disconnect.
+        /// </summary>
+        private void ScheduleReconnect()
+        {
+            if (!m_autoReconnect || !_wantConnected || _reconnect != null || !isActiveAndEnabled)
+            {
+                return;
+            }
+
+            var delay = Mathf.Min(Mathf.Max(1f, m_maxReconnectDelay), Mathf.Pow(2f, Mathf.Min(_reconnectAttempts, 16)));
+            _reconnectAttempts++;
+
+            Debug.Log($"Reconnecting to {m_brokerAddress}:{m_brokerPort} in {delay:0.#} s (attempt {_reconnectAttempts}).");
+            _reconnect = StartCoroutine(ReconnectCR(delay));
+        }
+
+
+        private IEnumerator ReconnectCR(float delay)
+        {
+            yield return new WaitForSecondsRealtime(delay);
+
+            _reconnect = null;
+
+            if (_wantConnected && !IsConnected)
+            {
+                Connect();
+            }
+        }
+
+
+        private void StopReconnect()
+        {
+            if (_reconnect != null)
+            {
+                StopCoroutine(_reconnect);
+                _reconnect = null;
+            }
+
+            _reconnectAttempts = 0;
         }
 
 
@@ -334,6 +488,7 @@ namespace MQTTUnity
         {
             _connected = true;
             _connectionClosed = false;
+            _reconnectAttempts = 0;
 
             Debug.Log($"Connected to {m_brokerAddress}:{m_brokerPort}...");
 
@@ -376,9 +531,21 @@ namespace MQTTUnity
 
             var pending = _pendingPublications.ToArray();
             _pendingPublications.Clear();
+            _warnedPendingOverflow = false;
 
-            foreach (var (topic, message, qosLevel, retain) in pending)
+            var maxAge = Instance != null ? Instance.m_maxPendingPublicationAge : 0f;
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var expired = 0;
+
+            foreach (var (topic, message, qosLevel, retain, queuedAt) in pending)
             {
+                if (maxAge > 0f && (now - queuedAt) / (double) System.Diagnostics.Stopwatch.Frequency > maxAge)
+                {
+                    expired++;
+
+                    continue;
+                }
+
                 try
                 {
                     _MQTTBackend.Publish(topic, message, qosLevel, retain);
@@ -388,6 +555,39 @@ namespace MQTTUnity
                     Debug.LogError($"Publishing pending message on {topic} failed: {e.Message}");
                 }
             }
+
+            if (expired > 0)
+            {
+                Debug.LogWarning($"Dropped {expired} queued publication(s) older than {maxAge} s instead of sending them late.");
+            }
+        }
+
+
+        /// <summary>
+        ///     Queues a publication for the next connection. When the queue is full
+        ///     (<see cref="DefaultMaxPendingPublications" />, or the client's setting), the oldest is dropped.
+        /// </summary>
+        private static void QueuePublication(string topic, byte[] payload, byte qosLevel, bool retain)
+        {
+            var max = Instance != null ? Instance.m_maxPendingPublications : DefaultMaxPendingPublications;
+
+            if (max > 0)
+            {
+                var overflow = _pendingPublications.Count - max + 1;
+
+                if (overflow > 0)
+                {
+                    _pendingPublications.RemoveRange(0, Math.Min(overflow, _pendingPublications.Count));
+
+                    if (!_warnedPendingOverflow)
+                    {
+                        _warnedPendingOverflow = true;
+                        Debug.LogWarning($"More than {max} publications are waiting for a connection to the broker. Dropping the oldest.");
+                    }
+                }
+            }
+
+            _pendingPublications.Add((topic, payload, qosLevel, retain, System.Diagnostics.Stopwatch.GetTimestamp()));
         }
 
 
@@ -499,7 +699,8 @@ namespace MQTTUnity
 
         /// <summary>
         ///     Publishes a UTF-8 string payload to the given topic.
-        ///     If not currently connected, the message is queued and sent on connect.
+        ///     If not currently connected, the message is queued and sent on connect. The queue is capped
+        ///     (oldest dropped first) and may drop messages older than the configured maximum age.
         /// </summary>
         /// <param name="topic">Target MQTT topic.</param>
         /// <param name="payload">String payload to publish.</param>
@@ -544,7 +745,7 @@ namespace MQTTUnity
                 }
             }
 
-            _pendingPublications.Add((topic, payload, qosLevel, retain));
+            QueuePublication(topic, payload, qosLevel, retain);
         }
 
 
@@ -658,6 +859,7 @@ namespace MQTTUnity
 
             Debug.Log("Connection to the broker closed.");
             OnDisconnected?.Invoke();
+            ScheduleReconnect();
         }
 
 
@@ -727,6 +929,9 @@ namespace MQTTUnity
         [ContextMenu(nameof(Disconnect))]
         public void Disconnect()
         {
+            _wantConnected = false;
+            StopReconnect();
+
             if (_disconnect != null)
             {
                 StopCoroutine(_disconnect);
@@ -749,7 +954,9 @@ namespace MQTTUnity
         /// <param name="dropPendingPublications">Also forget publications that were waiting for a connection.</param>
         private void DisconnectImmediately(bool dropPendingPublications)
         {
-            Interlocked.Increment(ref _connectionGeneration);
+            // Also closes a connection that finished connecting but was not picked up by the (stopped) coroutine.
+            ShutDownBackend(InvalidateConnectAttempts());
+            StopReconnect();
 
             if (_connect != null)
             {
@@ -770,6 +977,7 @@ namespace MQTTUnity
             if (dropPendingPublications)
             {
                 _pendingPublications.Clear();
+                _warnedPendingOverflow = false;
             }
 
             if (backend == null)
@@ -792,7 +1000,42 @@ namespace MQTTUnity
         {
             StopAllCoroutines();
             _disconnect = null;
+            _reconnect = null;
+            _wantConnected = false;
             DisconnectImmediately(true);
+        }
+
+
+        /// <summary>Reconnects when the client is enabled again after <see cref="OnDisable" /> closed a wanted connection.</summary>
+        private void OnEnable()
+        {
+            if (Instance != this || !_resumeOnEnable)
+            {
+                return;
+            }
+
+            _resumeOnEnable = false;
+            Connect();
+        }
+
+
+        /// <summary>
+        ///     A disabled client no longer runs <c>Update</c>, so incoming messages would pile up undispatched.
+        ///     Close the connection instead; subscriptions and pending publications are kept, and
+        ///     <see cref="OnEnable" /> connects again if the connection was wanted.
+        /// </summary>
+        private void OnDisable()
+        {
+            if (Instance != this)
+            {
+                return;
+            }
+
+            _resumeOnEnable = _wantConnected;
+            StopAllCoroutines();
+            _disconnect = null;
+            _reconnect = null;
+            DisconnectImmediately(false);
         }
 
 
@@ -809,6 +1052,8 @@ namespace MQTTUnity
 
             StopAllCoroutines();
             _disconnect = null;
+            _reconnect = null;
+            _wantConnected = false;
             DisconnectImmediately(false);
             Instance = null;
         }

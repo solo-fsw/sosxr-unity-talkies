@@ -132,6 +132,8 @@ EXPORT int SerialWriteTwo(unsigned char position, unsigned char speed) {
 
 // --------------------
 // SerialRead - Read one byte
+// Returns 0-255 for a byte, -1 when no data is available, -2 when the device is gone (unplugged / I/O error).
+// Plugins built before -2 existed returned -1 in that case too; the C# side handles both.
 // --------------------
 EXPORT int SerialRead() {
     if (fd < 0) {
@@ -147,7 +149,24 @@ EXPORT int SerialRead() {
         }
         return (int)byte;  // Return as int (0-255)
     }
-    
+
+    if (n < 0) {
+        // The port is opened with O_NONBLOCK, so "no data" is EAGAIN / EWOULDBLOCK.
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            return -1;  // Indicates no data
+        }
+
+        if (debugSerial) std::cerr << "Serial read error: " << strerror(errno) << std::endl;
+        return -2;  // EIO / ENXIO / ENODEV / EBADF: the device is gone
+    }
+
+    // n == 0: end of file. Make sure the device is really gone before reporting it.
+    struct termios options;
+    if (tcgetattr(fd, &options) != 0) {
+        if (debugSerial) std::cerr << "Serial device disconnected" << std::endl;
+        return -2;
+    }
+
     // No data available
     return -1;  // Indicates no data
 }

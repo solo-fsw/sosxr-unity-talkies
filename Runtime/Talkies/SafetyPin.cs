@@ -73,19 +73,19 @@ namespace SOSXR.Talkies
         /// <param name="value"><c>true</c> when the pin is driven HIGH; <c>false</c> when LOW.</param>
         private void StartTimer(int pinNumber, bool value)
         {
-            _tracker.OnPinSet(pinNumber, value, Time.time, m_setLowAfterSeconds);
+            _tracker.OnPinSet(pinNumber, value, Time.unscaledTime, m_setLowAfterSeconds);
         }
 
 
         private IEnumerator TimeCheckerCR()
         {
-            var wait = new WaitForSeconds(_checkDelay);
+            var wait = new WaitForSecondsRealtime(_checkDelay);
 
             for (;;)
             {
                 yield return wait;
 
-                foreach (var pin in _tracker.CollectExpired(Time.time))
+                foreach (var pin in _tracker.CollectExpired(Time.unscaledTime))
                 {
                     Debug.Log($"Setting pin {pin} to LOW because it has been too HIGH for too long.");
 

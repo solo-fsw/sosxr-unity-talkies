@@ -245,6 +245,15 @@ namespace uPLibrary.Networking.M2Mqtt
         /// </summary>
         public void Connect()
         {
+            #if !SSL
+            // TLS code is compiled out without the SSL define. Fail closed instead of silently
+            // connecting over plain TCP and sending credentials in cleartext.
+            if (secure)
+            {
+                throw new NotSupportedException("Encrypted MQTT connection requested, but TLS support is not compiled in (define SSL).");
+            }
+            #endif
+
             socket = new Socket(RemoteIpAddress.GetAddressFamily(), SocketType.Stream, ProtocolType.Tcp);
             // try connection to the broker
             socket.Connect(new IPEndPoint(RemoteIpAddress, RemotePort));
@@ -459,6 +468,12 @@ namespace uPLibrary.Networking.M2Mqtt
     public static class MqttSslUtility
     {
         #if (UNITY_EDITOR || !NET_4_6)
+        /// <summary>
+        ///     Converts an <see cref="MqttSslProtocols" /> value to the matching <see cref="SslProtocols" /> value.
+        ///     Throws <see cref="ArgumentException" /> for a version this build does not support.
+        /// </summary>
+        /// <param name="mqttSslProtocol">SSL/TLS protocol version to convert.</param>
+        /// <returns>The matching <see cref="SslProtocols" /> value.</returns>
         public static SslProtocols ToSslPlatformEnum(MqttSslProtocols mqttSslProtocol)
         {
             switch (mqttSslProtocol)
@@ -478,6 +493,12 @@ namespace uPLibrary.Networking.M2Mqtt
             }
         }
         #elif (!MF_FRAMEWORK_VERSION_V4_2 && !MF_FRAMEWORK_VERSION_V4_3 && !COMPACT_FRAMEWORK)
+        /// <summary>
+        ///     Converts an <see cref="MqttSslProtocols" /> value to the matching <see cref="SslProtocols" /> value.
+        ///     Throws <see cref="ArgumentException" /> for a version this build does not support.
+        /// </summary>
+        /// <param name="mqttSslProtocol">SSL/TLS protocol version to convert.</param>
+        /// <returns>The matching <see cref="SslProtocols" /> value.</returns>
         public static SslProtocols ToSslPlatformEnum(MqttSslProtocols mqttSslProtocol)
         {
             switch (mqttSslProtocol)
@@ -497,6 +518,12 @@ namespace uPLibrary.Networking.M2Mqtt
             }
         }
         #elif (MF_FRAMEWORK_VERSION_V4_2 || MF_FRAMEWORK_VERSION_V4_3)
+        /// <summary>
+        ///     Converts an <see cref="MqttSslProtocols" /> value to the matching <see cref="SslProtocols" /> value.
+        ///     Throws <see cref="ArgumentException" /> for a version this build does not support.
+        /// </summary>
+        /// <param name="mqttSslProtocol">SSL/TLS protocol version to convert.</param>
+        /// <returns>The matching <see cref="SslProtocols" /> value.</returns>
         public static SslProtocols ToSslPlatformEnum(MqttSslProtocols mqttSslProtocol)
         {
             switch (mqttSslProtocol)

@@ -177,6 +177,21 @@ namespace SOSXR.Talkies.Tests
         }
 
 
+        [Test]
+        public void Publish_WhileDisconnected_DropsOldestBeyondCap()
+        {
+            LogAssert.Expect(LogType.Warning, new Regex("Dropping the oldest"));
+
+            for (var i = 0; i < MQTTClient.DefaultMaxPendingPublications + 5; i++)
+            {
+                MQTTClient.Publish("a/b", i.ToString());
+            }
+
+            Assert.That(MQTTClient.PendingPublicationCount, Is.EqualTo(MQTTClient.DefaultMaxPendingPublications));
+            LogAssert.NoUnexpectedReceived(); // warned once, not once per dropped message
+        }
+
+
         [TestCase("")]
         [TestCase("a/#")]
         [TestCase("a/+/b")]

@@ -32,6 +32,9 @@ namespace SOSXR.Talkies
         [Header("Pin Control")]
         [SerializeField] [Range(0, 29)] private int m_defaultPin = 16;
 
+        [Tooltip("A toggle that has not received the device's GET answer within this time is dropped, so a late answer cannot switch the pin minutes later.")]
+        [SerializeField] [Suffix("s")] private float m_pendingToggleTimeout = 2f;
+
         [Header("Debug")]
         [Tooltip("Randomly toggles the onboard LED (pin 25) while enabled. For testing the connection only.")]
         [SerializeField] private bool m_debugToggleLED;
@@ -40,10 +43,15 @@ namespace SOSXR.Talkies
         private readonly byte[] _readBuffer = new byte[ReadChunkSize];
         private readonly SerialLineBuffer _lineBuffer = new();
         private readonly List<int> _pinList = new();
-        private readonly Dictionary<int, Action<int, bool>> _pendingToggles = new();
+        private readonly Dictionary<int, PendingToggle> _pendingToggles = new();
+        private readonly List<int> _expiredToggles = new();
 
         private ISerialConnect _connector;
         private bool _warnedNoConnector;
+        private bool _wasConnected;
+
+        /// <summary>Clock for pending-toggle timeouts, in seconds. Unscaled, so a paused game does not keep toggles alive. Replaceable for tests.</summary>
+        internal Func<float> Clock = () => Time.unscaledTime;
 
         /// <summary>Fired when a GET response is received, reporting the pin number and its current value.</summary>
         public event Action<int, bool> OnPinGetEvent;
@@ -77,6 +85,29 @@ namespace SOSXR.Talkies
             {
                 _connector = value;
                 _warnedNoConnector = false;
+                _wasConnected = false;
+                ResetPendingState();
+            }
+        }
+
+        /// <summary>How long, in seconds, a toggle waits for the device's GET answer before it is dropped.</summary>
+        public float PendingToggleTimeout
+        {
+            get => m_pendingToggleTimeout;
+            set => m_pendingToggleTimeout = Mathf.Max(0.1f, value);
+        }
+
+
+        private readonly struct PendingToggle
+        {
+            public readonly Action<int, bool> Callback;
+            public readonly float RequestedAt;
+
+
+            public PendingToggle(Action<int, bool> callback, float requestedAt)
+            {
+                Callback = callback;
+                RequestedAt = requestedAt;
             }
         }
 
@@ -152,11 +183,16 @@ namespace SOSXR.Talkies
         public void PollSerial()
         {
             var connector = Connector;
+            var connected = connector is { IsConnected: true };
 
-            if (connector is not { IsConnected: true })
+            TrackConnectionState(connected);
+
+            if (!connected)
             {
                 return;
             }
+
+            ExpirePendingToggles();
 
             for (var i = 0; i < MaxReadChunksPerFrame; i++)
             {
@@ -193,6 +229,62 @@ namespace SOSXR.Talkies
         }
 
 
+        /// <summary>
+        ///     A connect or disconnect makes everything in flight meaningless: half a line from the old connection,
+        ///     and toggles whose GET answer will never come (or would come from a different session).
+        /// </summary>
+        private void TrackConnectionState(bool connected)
+        {
+            if (connected == _wasConnected)
+            {
+                return;
+            }
+
+            _wasConnected = connected;
+            ResetPendingState();
+        }
+
+
+        private void ResetPendingState()
+        {
+            _pendingToggles.Clear();
+            _lineBuffer.Clear();
+        }
+
+
+        /// <summary>Drops toggles that have waited longer than <see cref="PendingToggleTimeout" /> for their GET answer.</summary>
+        internal void ExpirePendingToggles()
+        {
+            if (_pendingToggles.Count == 0)
+            {
+                return;
+            }
+
+            var now = Clock();
+            _expiredToggles.Clear();
+
+            foreach (var pair in _pendingToggles)
+            {
+                if (IsExpired(pair.Value, now))
+                {
+                    _expiredToggles.Add(pair.Key);
+                }
+            }
+
+            foreach (var pin in _expiredToggles)
+            {
+                _pendingToggles.Remove(pin);
+                Debug.LogWarning($"Toggle of pin {pin} dropped: no answer from the device within {m_pendingToggleTimeout} s.");
+            }
+        }
+
+
+        private bool IsExpired(PendingToggle toggle, float now)
+        {
+            return now - toggle.RequestedAt > m_pendingToggleTimeout;
+        }
+
+
         /// <summary>Handles one response line from the device. Public so it can be fed from other sources and tested.</summary>
         public void ProcessResponse(string line)
         {
@@ -208,7 +300,15 @@ namespace SOSXR.Talkies
                     if (_pendingToggles.TryGetValue(response.Pin, out var toggle))
                     {
                         _pendingToggles.Remove(response.Pin);
-                        toggle?.Invoke(response.Pin, response.Value);
+
+                        if (IsExpired(toggle, Clock()))
+                        {
+                            Debug.LogWarning($"Toggle of pin {response.Pin} dropped: the device answered after more than {m_pendingToggleTimeout} s.");
+                        }
+                        else
+                        {
+                            toggle.Callback?.Invoke(response.Pin, response.Value);
+                        }
                     }
 
                     OnPinGetEvent?.Invoke(response.Pin, response.Value);
@@ -345,7 +445,8 @@ namespace SOSXR.Talkies
         /// <summary>
         ///     Reads the current value of the specified pin, then sets it to the opposite state.
         ///     Only one toggle per pin can be pending; a second call before the device answers replaces the first.
-        ///     Does nothing while not connected.
+        ///     A toggle is dropped when the device does not answer within <see cref="PendingToggleTimeout" />, or when
+        ///     the connection changes. Does nothing while not connected.
         /// </summary>
         /// <param name="pin">GPIO pin number to toggle.</param>
         [Button]
@@ -358,12 +459,15 @@ namespace SOSXR.Talkies
                 return;
             }
 
-            _pendingToggles[pin] = (p, currentValue) =>
+            // Record the connection first, so the next poll does not mistake it for a fresh connection and clear this toggle.
+            TrackConnectionState(true);
+
+            _pendingToggles[pin] = new PendingToggle((p, currentValue) =>
             {
                 var newValue = !currentValue;
                 SetPin(p, newValue);
                 Debug.Log($"Toggled pin {p} from {PinProtocol.HighLow(currentValue)} to {PinProtocol.HighLow(newValue)}");
-            };
+            }, Clock());
 
             if (!SendCommand(PinProtocol.FormatGet(pin)))
             {

@@ -62,6 +62,11 @@ namespace SOSXR.Talkies
             try
             {
                 m_isConnected = serialClass.CallStatic<bool>("open", activity, _baudRate);
+
+                if (!m_isConnected)
+                {
+                    Debug.LogWarning("No USB serial device opened. If Android asked for USB permission, grant it and call Connect again.");
+                }
             }
             catch (Exception ex)
             {
