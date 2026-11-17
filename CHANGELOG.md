@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 The changelog format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
-## [Unreleased]
+## [0.5.0] - 2026-11-17
 
 ### Added
 
@@ -11,6 +11,13 @@ The changelog format is based on [Keep a Changelog](https://keepachangelog.com/e
 - `MQTTClient` pending-publication cap (`m_maxPendingPublications`, default `DefaultMaxPendingPublications` = 100, oldest dropped) and optional maximum age (`m_maxPendingPublicationAge`, off by default).
 - `PinController.PendingToggleTimeout` (default 2 s, unscaled time).
 - Native `SerialRead` returns -2 when the device is gone (macOS and Windows sources). Needs a rebuilt plugin; old binaries keep working.
+- `PinController.OnPinSetRequested` event.
+- `PinDeadlineTracker.OnPinSetRequested` and `PinDeadlineTracker.MarkExpiryReported`.
+- `SerialBridge.isOpen()` in the Android Java bridge.
+
+### Changed
+
+- `PinDeadlineTracker.CollectExpired` no longer forgets the pins it returns; a pin's deadline is cleared by a LOW confirmation.
 
 ### Fixed
 
@@ -22,6 +29,10 @@ The changelog format is based on [Keep a Changelog](https://keepachangelog.com/e
 - `MQTTClient` closes its connection on `OnDisable` (reconnects on `OnEnable`) and before a script reload in Play mode, so no zombie socket or undrained queue remains.
 - `PinController` drops toggles whose GET answer arrives too late, and clears pending toggles and partial lines when the connection or connector changes.
 - Android `SerialBridge.open` requests USB permission when missing. Connect again after the user grants it.
+- `SafetyPin` now starts its countdown when a HIGH command is sent, not only when the device confirms it, so a lost confirmation no longer leaves a pin without a timeout.
+- `SafetyPin` keeps sending LOW once per second until the device confirms LOW. Before, one failed write left the pin HIGH.
+- Android: an unplugged USB serial device now sets `IsConnected` to false.
+- `PinTimer` and `PinTimerWithEvents`: the pulse uses unscaled time, so `Time.timeScale = 0` cannot hold a pin HIGH. Their buttons do nothing outside Play mode.
 
 ## [0.4.0] - 2026-11-13
 

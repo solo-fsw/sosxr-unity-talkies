@@ -60,6 +60,15 @@ namespace SOSXR.Talkies
         [Button]
         private void ToggleOnOff()
         {
+            // In Edit mode the coroutine would end at once but its handle would still be stored,
+            // so the next press would report a pulse that is not running.
+            if (!Application.isPlaying)
+            {
+                Debug.LogWarning("Pulses only run in Play mode.");
+
+                return;
+            }
+
             if (_toggleCoroutine != null)
             {
                 StopCoroutine(_toggleCoroutine);
@@ -88,7 +97,8 @@ namespace SOSXR.Talkies
 
             Controller.SetPin(m_pin, true);
 
-            yield return new WaitForSeconds(m_toggleTime);
+            // Realtime, so timeScale = 0 cannot hold the pin HIGH.
+            yield return new WaitForSecondsRealtime(m_toggleTime);
 
             Controller.SetPin(m_pin, false);
 

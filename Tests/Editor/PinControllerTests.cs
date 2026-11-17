@@ -70,6 +70,33 @@ namespace SOSXR.Talkies.Tests
 
 
         [Test]
+        public void SetPin_RaisesOnPinSetRequested()
+        {
+            var requests = new List<(int pin, bool value)>();
+            _controller.OnPinSetRequested += (pin, value) => requests.Add((pin, value));
+
+            _controller.SetPin(3, true);
+            _controller.SetPin(3, false);
+
+            Assert.That(requests, Is.EqualTo(new[] { (3, true), (3, false) }));
+        }
+
+
+        [Test]
+        public void SetPin_RaisesOnPinSetRequestedEvenWhenWriteFails()
+        {
+            var requests = 0;
+            _controller.OnPinSetRequested += (_, _) => requests++;
+            _connector.Connected = false;
+
+            LogAssert.Expect(LogType.Warning, new Regex("Not connected"));
+            _controller.SetPin(3, true);
+
+            Assert.That(requests, Is.EqualTo(1));
+        }
+
+
+        [Test]
         public void GetPin_WritesCommandThroughConnector()
         {
             _controller.GetPin(7);

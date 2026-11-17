@@ -27,6 +27,11 @@ namespace SOSXR.Talkies
         private AndroidJavaClass serialClass;
         private AndroidJavaObject activity;
 
+        // The bridge's isOpen() is asked at most once per frame; Read and Write share the answer.
+        private int _openCheckFrame = -1;
+        private bool _portOpen;
+        private bool _openCheckUnavailable;
+
 
         private void Awake()
         {
@@ -62,6 +67,7 @@ namespace SOSXR.Talkies
             try
             {
                 m_isConnected = serialClass.CallStatic<bool>("open", activity, _baudRate);
+                _openCheckFrame = -1;
 
                 if (!m_isConnected)
                 {
@@ -93,11 +99,71 @@ namespace SOSXR.Talkies
         }
 
 
+        /// <summary>
+        ///     Asks the Java bridge whether the port is still open, at most once per frame.
+        ///     The bridge's reader thread stops when the device is unplugged, but the port stays set until <c>close</c> is called.
+        /// </summary>
+        private bool IsPortStillOpen()
+        {
+            if (_openCheckUnavailable)
+            {
+                return true;
+            }
+
+            var frame = Time.frameCount;
+
+            if (frame == _openCheckFrame)
+            {
+                return _portOpen;
+            }
+
+            _openCheckFrame = frame;
+
+            try
+            {
+                _portOpen = serialClass.CallStatic<bool>("isOpen");
+            }
+            catch (Exception ex)
+            {
+                // An older bridge without isOpen(): stop asking, and keep the previous behaviour.
+                _openCheckUnavailable = true;
+                _portOpen = true;
+                Debug.LogWarning($"The Android serial bridge has no isOpen(); an unplugged device will not be detected: {ex.Message}");
+            }
+
+            return _portOpen;
+        }
+
+
+        /// <summary>Closes the bridge after the device went away, so <see cref="IsConnected" /> becomes false. Logs one warning.</summary>
+        private void HandleConnectionLost()
+        {
+            try
+            {
+                serialClass.CallStatic("close");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"Closing the serial bridge failed: {ex.Message}");
+            }
+
+            m_isConnected = false;
+            Debug.LogWarning("USB serial connection lost (device unplugged or port failed). Call Connect again after reconnecting.");
+        }
+
+
         /// <inheritdoc />
         public int Write(byte[] data, int offset, int count)
         {
             if (!m_isConnected || serialClass == null || data == null || count <= 0)
             {
+                return 0;
+            }
+
+            if (!IsPortStillOpen())
+            {
+                HandleConnectionLost();
+
                 return 0;
             }
 
@@ -127,6 +193,13 @@ namespace SOSXR.Talkies
         {
             if (!m_isConnected || serialClass == null || buffer == null || count <= 0)
             {
+                return 0;
+            }
+
+            if (!IsPortStillOpen())
+            {
+                HandleConnectionLost();
+
                 return 0;
             }
 

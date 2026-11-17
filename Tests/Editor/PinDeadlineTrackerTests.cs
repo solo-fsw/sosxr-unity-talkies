@@ -13,7 +13,97 @@ namespace SOSXR.Talkies.Tests
 
             Assert.That(tracker.CollectExpired(39f), Is.Empty);
             Assert.That(tracker.CollectExpired(40f), Is.EqualTo(new[] { 16 }));
-            Assert.That(tracker.HasDeadline(16), Is.False, "An expired pin is forgotten until it goes HIGH again.");
+            Assert.That(tracker.HasDeadline(16), Is.True, "An expired pin is kept until the device confirms LOW.");
+        }
+
+
+        [Test]
+        public void ExpiredPin_IsReturnedAgainUntilLowConfirmation()
+        {
+            var tracker = new PinDeadlineTracker();
+            tracker.OnPinSet(16, true, 0f, 10f);
+
+            Assert.That(tracker.CollectExpired(10f), Is.EqualTo(new[] { 16 }));
+
+            // The LOW write failed, so no confirmation arrived: the next check must retry.
+            Assert.That(tracker.CollectExpired(11f), Is.EqualTo(new[] { 16 }));
+
+            tracker.OnPinSet(16, false, 12f, 10f);
+
+            Assert.That(tracker.CollectExpired(13f), Is.Empty);
+            Assert.That(tracker.HasDeadline(16), Is.False);
+        }
+
+
+        [Test]
+        public void MarkExpiryReported_IsTrueOnceUntilLowConfirmation()
+        {
+            var tracker = new PinDeadlineTracker();
+            tracker.OnPinSet(4, true, 0f, 1f);
+
+            Assert.That(tracker.MarkExpiryReported(4), Is.True);
+            Assert.That(tracker.MarkExpiryReported(4), Is.False, "Retries must not log again.");
+
+            tracker.OnPinSet(4, false, 2f, 1f);
+            tracker.OnPinSet(4, true, 3f, 1f);
+
+            Assert.That(tracker.MarkExpiryReported(4), Is.True, "A new HIGH period is reported again.");
+        }
+
+
+        [Test]
+        public void HighRequest_StartsDeadlineWithoutConfirmation()
+        {
+            var tracker = new PinDeadlineTracker();
+            tracker.OnPinSetRequested(16, true, 10f, 30f);
+
+            Assert.That(tracker.HasDeadline(16), Is.True);
+            Assert.That(tracker.KnownPins, Does.Contain(16));
+            Assert.That(tracker.CollectExpired(40f), Is.EqualTo(new[] { 16 }));
+        }
+
+
+        [Test]
+        public void ConfirmationAfterHighRequest_DoesNotExtendDeadline()
+        {
+            var tracker = new PinDeadlineTracker();
+            tracker.OnPinSetRequested(5, true, 0f, 10f);
+            tracker.OnPinSet(5, true, 2f, 10f);
+
+            Assert.That(tracker.CollectExpired(10f), Is.EqualTo(new[] { 5 }));
+        }
+
+
+        [Test]
+        public void HighRequestAgain_DoesNotExtendDeadline()
+        {
+            var tracker = new PinDeadlineTracker();
+            tracker.OnPinSetRequested(5, true, 0f, 10f);
+            tracker.OnPinSetRequested(5, true, 8f, 10f);
+
+            Assert.That(tracker.CollectExpired(10f), Is.EqualTo(new[] { 5 }));
+        }
+
+
+        [Test]
+        public void LowRequest_DoesNotClearDeadline()
+        {
+            var tracker = new PinDeadlineTracker();
+            tracker.OnPinSet(5, true, 0f, 10f);
+            tracker.OnPinSetRequested(5, false, 1f, 10f);
+
+            Assert.That(tracker.HasDeadline(5), Is.True, "A LOW command can be lost; only the LOW confirmation clears the deadline.");
+            Assert.That(tracker.CollectExpired(10f), Is.EqualTo(new[] { 5 }));
+        }
+
+
+        [Test]
+        public void NegativePins_AreIgnoredForRequests()
+        {
+            var tracker = new PinDeadlineTracker();
+
+            Assert.DoesNotThrow(() => tracker.OnPinSetRequested(-1, true, 0f, 1f));
+            Assert.That(tracker.KnownPins, Is.Empty);
         }
 
 

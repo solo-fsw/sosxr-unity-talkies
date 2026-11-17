@@ -1,6 +1,6 @@
 {
   "name": "com.sosxr.talkies",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "displayName": "Talkies",
   "description": "A Unity package for communication with other devices",
   "documentationUrl": "https://github.com/solo-fsw/sosxr-unity-talkies",

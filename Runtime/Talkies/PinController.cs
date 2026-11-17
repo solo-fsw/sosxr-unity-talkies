@@ -59,6 +59,13 @@ namespace SOSXR.Talkies
         /// <summary>Fired after a SET command confirmation is received, with the pin number and the new value.</summary>
         public event Action<int, bool> OnPinSetEvent;
 
+        /// <summary>
+        ///     Fired by <see cref="SetPin" /> just before a SET command is sent, with the pin number and the requested value.
+        ///     Fired whether or not the write succeeds. Lets <see cref="SafetyPin" /> start its deadline without waiting
+        ///     for the device's confirmation, which can be lost.
+        /// </summary>
+        public event Action<int, bool> OnPinSetRequested;
+
 
         /// <summary>
         ///     The serial connector used for all reads and writes. Resolved lazily from this GameObject,
@@ -426,6 +433,8 @@ namespace SOSXR.Talkies
             {
                 _pinList.Add(pin);
             }
+
+            OnPinSetRequested?.Invoke(pin, value);
 
             SendCommand(PinProtocol.FormatSet(pin, value));
         }

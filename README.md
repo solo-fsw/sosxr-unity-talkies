@@ -119,7 +119,7 @@ The default pin can also be configured in the Inspector and controlled via `SetD
 
 #### SafetyPin
 
-Add `SafetyPin` to the same GameObject as `PinController`. It listens for `OnPinSetEvent` and automatically drives any pin back LOW after a configurable timeout (default: 30 s). This prevents components (e.g. solenoids, LEDs) from being left energised indefinitely.
+Add `SafetyPin` to the same GameObject as `PinController`. It listens for `OnPinSetEvent` and drives any pin back LOW after a configurable timeout (default: 30 s). The countdown starts when HIGH is sent, not when the device confirms it. SafetyPin repeats LOW every second until the device confirms it. This prevents components (e.g. solenoids, LEDs) from being left energised indefinitely.
 
 #### PinTimer
 

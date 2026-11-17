@@ -147,6 +147,14 @@ public class SerialBridge {
         reader.start();
     }
 
+    /**
+     * True while a port is open and the background reader is running.
+     * Becomes false when the reader stops because the device was unplugged or the port failed.
+     */
+    public static boolean isOpen() {
+        return port != null && running;
+    }
+
     public static void close() {
         running = false;
 

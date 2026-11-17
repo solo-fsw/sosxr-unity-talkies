@@ -52,6 +52,7 @@ namespace SOSXR.Talkies
             if (Controller != null)
             {
                 Controller.OnPinSetEvent += StartTimer;
+                Controller.OnPinSetRequested += StartTimerOnRequest;
             }
 
             StartCoroutine(TimeCheckerCR());
@@ -77,6 +78,17 @@ namespace SOSXR.Talkies
         }
 
 
+        /// <summary>
+        ///     Called whenever <see cref="PinController.SetPin" /> sends a SET command. A HIGH command starts the countdown
+        ///     right away, so a lost confirmation cannot leave the pin HIGH. A LOW command does not stop the countdown;
+        ///     only the device's LOW confirmation does.
+        /// </summary>
+        private void StartTimerOnRequest(int pinNumber, bool value)
+        {
+            _tracker.OnPinSetRequested(pinNumber, value, Time.unscaledTime, m_setLowAfterSeconds);
+        }
+
+
         private IEnumerator TimeCheckerCR()
         {
             var wait = new WaitForSecondsRealtime(_checkDelay);
@@ -85,11 +97,15 @@ namespace SOSXR.Talkies
             {
                 yield return wait;
 
+                // Expired pins stay in the tracker until the device confirms LOW, so the command is retried every check.
                 foreach (var pin in _tracker.CollectExpired(Time.unscaledTime))
                 {
-                    Debug.Log($"Setting pin {pin} to LOW because it has been too HIGH for too long.");
+                    if (_tracker.MarkExpiryReported(pin))
+                    {
+                        Debug.Log($"Setting pin {pin} to LOW because it has been too HIGH for too long. Retrying until the device confirms.");
+                    }
 
-                    if (Controller != null)
+                    if (Controller != null && Controller.IsConnected)
                     {
                         Controller.SetPin(pin, false);
                     }
@@ -123,6 +139,7 @@ namespace SOSXR.Talkies
             if (_pinController != null)
             {
                 _pinController.OnPinSetEvent -= StartTimer;
+                _pinController.OnPinSetRequested -= StartTimerOnRequest;
             }
 
             StopAllCoroutines();
