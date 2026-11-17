@@ -12,17 +12,17 @@
     {
       "displayName": "MQTT",
       "description": "Contains MQTT samples",
-      "path": "Samples/MQTT"
+      "path": "Samples~/MQTT"
     },
     {
       "displayName": "MQTT raspmarker",
       "description": "Contains raspmarker samples",
-      "path": "Samples/MQTT_raspmarker"
+      "path": "Samples~/MQTT_raspmarker"
     },
     {
       "displayName": "Talkies",
       "description": "Contains talkies samples",
-      "path": "Samples/Talkies"
+      "path": "Samples~/Talkies"
     }
   ],
   "author": {
